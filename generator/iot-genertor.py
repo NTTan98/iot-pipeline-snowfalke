@@ -1,23 +1,7 @@
-import snowflake.connector
-import json
 import random
 from datetime import datetime, timezone
-import time
-from dotenv import load_dotenv  # NEW
 import os
-load_dotenv()  
-
-# =============================================
-# CONFIG - Thay thông tin Snowflake của bạn
-# =============================================
-SNOWFLAKE_CONFIG = {
-    "account":   os.getenv("SNOWFLAKE_ACCOUNT"),
-    "user":      os.getenv("SNOWFLAKE_USER"),
-    "password":  os.getenv("SNOWFLAKE_PASSWORD"),
-    "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "iot_xs"),
-    "database":  os.getenv("SNOWFLAKE_DATABASE", "iot"),
-    "schema":    os.getenv("SNOWFLAKE_SCHEMA", "bronze"),
-}
+import json
 
 # =============================================
 # IOT DEVICES CONFIG (Digi Remote Manager)
@@ -65,32 +49,14 @@ def generate_record(device_id: str, site_id: str) -> dict:
     }
 
 # =============================================
-# LOAD VÀO BRONZE LAYER
-# =============================================
-def insert_bronze(conn, records: list):
-    cursor = conn.cursor()
-    insert_sql = """
-        INSERT INTO iot.bronze.device_telemetry (json_data, file_name)
-        SELECT PARSE_JSON(%s), %s
-    """
-    for record in records:
-        cursor.execute(insert_sql, (
-            json.dumps(record),
-            f"generator_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        ))
-    cursor.close()
-
-# =============================================
 # MAIN: GENERATE 1,000 RECORDS
 # =============================================
 def main():
     print("🚀 Digi IoT Generator Starting...")
     print(f"📡 Generating data for {len(DEVICES)} devices across {len(SITES)} sites")
 
-    # Connect Snowflake
-    print("\n🔌 Connecting to Snowflake...")
-    conn = snowflake.connector.connect(**SNOWFLAKE_CONFIG)
-    print("✅ Connected!")
+    # Tạo output dir
+    os.makedirs("output_json", exist_ok=True)
 
     # Generate records
     records = []
@@ -98,44 +64,22 @@ def main():
         device = random.choice(DEVICES)
         site = random.choice(list(SITES.keys()))
         records.append(generate_record(device, site))
+    
+    filename = f"output_json/iot_batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(filename, 'w') as f:
+        json.dump(records, f, indent=2)
+    print(f"💾 Saved batch: {filename}")
+
+        # Stats
+    cold_alerts = sum(1 for r in records if r['site_id'] == 'Cold_Storage' and r['alert_type'])
+    total_alerts = sum(1 for r in records if r['alert_type'])
 
     print(f"\n📊 Generated {len(records)} records")
-    print(f"   🌡️  Cold Storage alerts: {sum(1 for r in records if r['site_id'] == 'Cold_Storage' and r['alert_type'])}")
-    print(f"   ⚠️  Total alerts: {sum(1 for r in records if r['alert_type'])}")
-
-    # Insert into Bronze
-    print("\n📥 Loading into Snowflake Bronze layer...")
-    BATCH_SIZE = 100
-    for i in range(0, len(records), BATCH_SIZE):
-        batch = records[i:i+BATCH_SIZE]
-        insert_bronze(conn, batch)
-        print(f"   ✅ Batch {i//BATCH_SIZE + 1}/10: {len(batch)} records loaded")
-        time.sleep(0.1)
-
-    # Verify
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM iot.bronze.device_telemetry")
-    total = cursor.fetchone()[0]
-    print(f"\n🎉 DONE! Total records in Bronze: {total}")
-
-    # Preview
-    cursor.execute("""
-        SELECT 
-          json_data:device_id::STRING AS device_id,
-          json_data:site_id::STRING AS site_id,
-          json_data:temperature::FLOAT AS temp,
-          json_data:alert_type::STRING AS alert
-        FROM iot.bronze.device_telemetry 
-        LIMIT 5
-    """)
-    print("\n📋 Preview (5 records):")
-    print(f"{'DEVICE':<15} {'SITE':<15} {'TEMP':>8} {'ALERT':<15}")
-    print("-" * 55)
-    for row in cursor.fetchall():
-        print(f"{row[0]:<15} {row[1]:<15} {row[2]:>8.1f} {str(row[3]):<15}")
-
-    conn.close()
-    print("\n✅ Connection closed. Generator complete!")
+    print(f"   🌡️  Cold Storage alerts: {cold_alerts}")
+    print(f"   ⚠️  Total alerts: {total_alerts}")
+    print("📤 Next: PUT file://output_json/*.json @iot_generator_stage")
+    
+    print("\n✅ READY FOR SNOWFLAKE STAGE!")
 
 if __name__ == "__main__":
     main()

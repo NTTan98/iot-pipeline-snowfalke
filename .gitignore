@@ -18,3 +18,4 @@ installed.cfg
 MANIFEST
 venv/
 .env
+output_json/
