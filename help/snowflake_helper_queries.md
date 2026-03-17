@@ -1,0 +1,135 @@
+# ❄️ SNOWFLAKE HELPER QUERIES  
+**Troubleshooting & Pipeline Health Check**  
+**Tan Nguyen | 2026-03-17**
+
+Tập hợp các **query thường dùng** để debug:
+- Snowpipe  
+- Stream  
+- Task  
+- Time Travel  
+
+---
+
+## 📁 1. STAGE (`@STAGE`)
+
+```sql
+LIST @IOT.BRONZE.IOTDATA;
+
+SELECT 
+    $1, 
+    $2, 
+    METADATA$FILENAME 
+FROM @IOT.BRONZE.IOTDATA 
+LIMIT 10;
+```
+
+---
+
+## 📦 2. COPY INTO & ERRORS
+
+```sql
+COPY INTO IOT.BRONZE.DEVICE_TELEMETRY (JSON_DATA, file_name)
+FROM (
+    SELECT 
+        $1, 
+        METADATA$FILENAME 
+    FROM @IOT.BRONZE.IOTDATA
+)
+ON_ERROR = 'CONTINUE';
+```
+
+### 🔍 Copy History
+
+```sql
+SELECT 
+    FILE_NAME, 
+    STATUS, 
+    FIRST_ERROR_MESSAGE 
+FROM TABLE(
+    INFORMATION_SCHEMA.COPY_HISTORY(
+        TABLE_NAME => 'IOT.BRONZE.DEVICE_TELEMETRY',
+        START_TIME => DATEADD(days, -14, CURRENT_TIMESTAMP())
+    )
+);
+```
+
+---
+
+## 🚰 3. SNOWPIPE
+
+```sql
+SELECT SYSTEM$PIPE_STATUS('IOT.BRONZE.IOT_PIPE');
+
+ALTER PIPE IOT.BRONZE.IOT_PIPE REFRESH;
+```
+
+---
+
+## 🔄 4. STREAM + TASK
+
+### 🧪 Check Stream
+
+```sql
+SELECT SYSTEM$STREAM_HAS_DATA('BRONZE_IOT_STREAM');
+```
+
+### 📜 Task History
+
+```sql
+SELECT 
+    name, 
+    state, 
+    scheduled_time, 
+    error_message
+FROM TABLE(
+    INFORMATION_SCHEMA.TASK_HISTORY(
+        TASK_NAME => 'SILVER_IOT_TASK'
+    )
+)
+ORDER BY scheduled_time DESC;
+```
+
+### 📋 List Tasks
+
+```sql
+SHOW TASKS LIKE '%IOT%';
+```
+
+---
+
+## ⏪ 5. TIME TRAVEL
+
+```sql
+SELECT * 
+FROM IOT.BRONZE.DEVICE_TELEMETRY 
+AT (OFFSET => -1800);
+```
+
+```sql
+UNDROP TABLE IOT.BRONZE.DEVICE_TELEMETRY;
+```
+
+---
+
+## 🔌 6. INTEGRATION
+
+```sql
+SHOW NOTIFICATION INTEGRATIONS;
+```
+
+```sql
+DESC NOTIFICATION INTEGRATION AZURE_SNOWPIPE_NI;
+```
+
+---
+
+## 🟢 7. PIPELINE DASHBOARD
+
+```sql
+SELECT 
+    SYSTEM$STREAM_HAS_DATA('BRONZE_IOT_STREAM') AS STREAM_READY,
+    SYSTEM$PIPE_STATUS('IOT.BRONZE.IOT_PIPE'):executionState AS PIPE_STATE,
+    COUNT(*) AS BRONZE_ROWS_HOUR
+FROM IOT.BRONZE.DEVICE_TELEMETRY
+WHERE DATE_TRUNC('HOUR', CURRENT_TIMESTAMP()) = DATE_TRUNC('HOUR', CURRENT_TIMESTAMP());
+```

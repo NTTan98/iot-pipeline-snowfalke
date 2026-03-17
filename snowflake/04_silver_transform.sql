@@ -1,40 +1,88 @@
--- =============================================
--- D1T3: BRONZE → SILVER TRANSFORM
--- =============================================
+USE DATABASE IOT;
+USE SCHEMA SILVER;
 
-USE DATABASE iot;
-USE SCHEMA silver;
-USE WAREHOUSE iot_xs;
+-- 1. STREAM từ Bronze (Change Data Capture)
+CREATE OR REPLACE STREAM BRONZE_IOT_STREAM
+ON TABLE BRONZE.IOT_PIPE_RAW  -- Bronze raw JSON table
+APPEND_ONLY = TRUE;
 
--- ⭐ 1 LỆNH FLATTEN JSON → Typed table
-INSERT INTO silver.device_metrics
+-- 2. TASK tự động chạy mỗi 5 phút (Silver transformation)
+create or replace task IOT.SILVER.SILVER_IOT_TASK
+	warehouse=COMPUTE_WH
+	schedule='5 MINUTE'
+	when SYSTEM$STREAM_HAS_DATA('BRONZE_IOT_STREAM')
+	as INSERT INTO SILVER.DEVICE_TELEMETRY_HOURLY (
+  DEVICE_ID,
+  SITE_ID,
+  HOUR_BUCKET,
+
+  AVG_TEMPERATURE,
+  MIN_TEMPERATURE,
+  MAX_TEMPERATURE,
+
+  AVG_HUMIDITY,
+  MIN_HUMIDITY,
+  MAX_HUMIDITY,
+
+  AVG_BATTERY_PCT,
+  SIGNAL_RSSI_AVG,
+  UPTIME_HOURS,
+  DATA_USAGE_MB,
+  RECORD_COUNT,
+
+  HAS_TEMPERATURE_ALERT,
+  HAS_HUMIDITY_ALERT,
+
+  LOAD_TS
+)
+
+WITH parsed AS (
+  SELECT 
+    TRY_PARSE_JSON(JSON_DATA) AS data
+  FROM BRONZE_IOT_STREAM
+)
+
 SELECT 
-  $1:device_id::STRING           as device_id,        -- "DigiXBee-001"
-  $1:site_id::STRING             as site_id,          -- "Cold_Storage"
-  $1:timestamp::TIMESTAMP_NTZ    as timestamp,         -- 2026-03-08 17:00:00
-  $1:temperature::FLOAT          as temperature,      -- 5.23
-  $1:humidity::FLOAT             as humidity,         -- 45.6
-  $1:battery_pct::FLOAT          as battery_pct,      -- 87.3
-  $1:signal_rssi::INT            as signal_rssi,      -- -65
-  $1:uptime_hours::FLOAT         as uptime_hours,     -- 23456.7
-  $1:data_usage_mb::FLOAT        as data_usage_mb,    -- 2.34
-  $1:alert_type::STRING          as alert_type,       -- "TEMP_HIGH"
-  $1:alert_severity::STRING      as alert_severity,   -- "HIGH"
-  CURRENT_TIMESTAMP()            as loaded_at
-FROM bronze.device_telemetry;
+  data:device_id::VARCHAR AS DEVICE_ID,
+  data:site_id::VARCHAR AS SITE_ID,
 
--- ✅ Verify transformation
-SELECT COUNT(*) as silver_records FROM silver.device_metrics;
+  DATE_TRUNC('HOUR', TRY_TO_TIMESTAMP_NTZ(data:timestamp::STRING)) AS HOUR_BUCKET,
 
--- Stats
-SELECT 
-  site_id,
-  COUNT(*) as records,
-  ROUND(AVG(temperature), 2) as avg_temp,
-  COUNT_IF(alert_type IS NOT NULL) as alerts,
-  ROUND(AVG(battery_pct), 1) as avg_battery
-FROM silver.device_metrics 
-GROUP BY 1 ORDER BY 2 DESC;
+  AVG(data:temperature::FLOAT) AS AVG_TEMPERATURE,
+  MIN(data:temperature::FLOAT) AS MIN_TEMPERATURE,
+  MAX(data:temperature::FLOAT) AS MAX_TEMPERATURE,
 
--- Preview typed data
-SELECT * FROM silver.device_metrics LIMIT 10;
+  AVG(data:humidity::FLOAT) AS AVG_HUMIDITY,
+  MIN(data:humidity::FLOAT) AS MIN_HUMIDITY,
+  MAX(data:humidity::FLOAT) AS MAX_HUMIDITY,
+
+  AVG(data:battery_pct::FLOAT) AS AVG_BATTERY_PCT,
+  AVG(data:signal_rssi::INT) AS SIGNAL_RSSI_AVG,
+
+  MAX(data:uptime_hours::FLOAT) AS UPTIME_HOURS,
+  SUM(data:data_usage_mb::FLOAT) AS DATA_USAGE_MB,
+
+  COUNT(*) AS RECORD_COUNT,
+
+  MAX(CASE 
+        WHEN data:temperature::FLOAT < 2 OR data:temperature::FLOAT > 8 
+        THEN TRUE ELSE FALSE 
+      END) AS HAS_TEMPERATURE_ALERT,
+
+  MAX(CASE 
+        WHEN data:humidity::FLOAT < 30 OR data:humidity::FLOAT > 70 
+        THEN TRUE ELSE FALSE 
+      END) AS HAS_HUMIDITY_ALERT,
+
+  CURRENT_TIMESTAMP() AS LOAD_TS
+
+FROM parsed
+
+GROUP BY 
+  data:device_id::VARCHAR,
+  data:site_id::VARCHAR,
+  DATE_TRUNC('HOUR', TRY_TO_TIMESTAMP_NTZ(data:timestamp::STRING));
+
+-- 3. BẮT ĐẦU TASK
+ALTER TASK SILVER_IOT_TASK RESUME;
+SHOW TASKS;
