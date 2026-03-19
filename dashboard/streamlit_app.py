@@ -43,8 +43,8 @@ with col2:
     st.metric("Total Alerts (1h)", alerts.iloc[0,0], delta="+12")
 
 with col3:
-    uptime = pd.read_sql("SELECT ROUND(AVG(avg_uptime_pct),1) as pct FROM fleet_metrics WHERE analysis_hour > CURRENT_TIMESTAMP() - INTERVAL '24 HOURS'", conn)
-    st.metric("Fleet Uptime %", f"{uptime.iloc[0,0]}%", delta="+0.5")
+    uptime = pd.read_sql("SELECT ROUND(AVG(avg_uptime_hours),1) as pct FROM fleet_metrics WHERE analysis_hour > CURRENT_TIMESTAMP() - INTERVAL '24 HOURS'", conn)
+    st.metric("Avg Uptime (hrs) %", f"{uptime.iloc[0,0]}%", delta="+0.5")
 
 with col4:
     usage = pd.read_sql("SELECT ROUND(SUM(total_data_usage_mb),1) as mb FROM fleet_metrics WHERE analysis_hour > CURRENT_TIMESTAMP() - INTERVAL '24 HOURS'", conn)
@@ -63,11 +63,11 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("🌡️ Temperature Heatmap (Site)")
     df_temp = pd.read_sql("""
-        SELECT site_id as site_id, 
-            ROUND(AVG(avg_temperature),1) as avg_temp
-        FROM fleet_metrics 
-        WHERE analysis_hour > CURRENT_TIMESTAMP() - INTERVAL '24 HOURS'
-        GROUP BY 1 ORDER BY 2 DESC
+        SELECT site_id::VARCHAR AS site_id,    -- ép string
+            ROUND(AVG(avg_temperature), 1) AS avg_temp
+        FROM fleet_metrics
+        GROUP BY site_id                        -- bỏ filter thời gian
+        ORDER BY avg_temp DESC
     """, conn)
 
     fig_temp = px.bar(df_temp, x="SITE_ID", y="AVG_TEMP",
