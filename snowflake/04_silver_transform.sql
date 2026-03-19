@@ -3,7 +3,7 @@ USE SCHEMA SILVER;
 
 -- 1. STREAM từ Bronze (Change Data Capture)
 CREATE OR REPLACE STREAM BRONZE_IOT_STREAM
-ON TABLE BRONZE.IOT_PIPE_RAW  -- Bronze raw JSON table
+ON TABLE BRONZE.DEVICE_TELEMETRY  -- Bronze raw JSON table
 APPEND_ONLY = TRUE;
 
 -- 2. TASK tự động chạy mỗi 5 phút (Silver transformation)
@@ -38,7 +38,7 @@ create or replace task IOT.SILVER.SILVER_IOT_TASK
 
 WITH parsed AS (
   SELECT 
-    TRY_PARSE_JSON(JSON_DATA) AS data
+    JSON_DATA AS data
   FROM BRONZE_IOT_STREAM
 )
 
