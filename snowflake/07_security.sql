@@ -9,11 +9,11 @@
 
 USE ROLE ACCOUNTADMIN;
 USE DATABASE iot;
-USE WAREHOUSE iot_xs;
+USE WAREHOUSE COMPUTE_WH;
 
 -- ============================================================
 -- 1. RESOURCE MONITOR
--- Giới hạn credit — tảnh báo 80%, tắt warehouse khi đạt 100%
+-- Giới hạn credit — cảnh báo 80%, tắt warehouse khi đạt 100%
 -- ============================================================
 CREATE OR REPLACE RESOURCE MONITOR iot_monitor
   WITH CREDIT_QUOTA = 10
@@ -21,7 +21,7 @@ CREATE OR REPLACE RESOURCE MONITOR iot_monitor
     ON 80  PERCENT DO NOTIFY
     ON 100 PERCENT DO SUSPEND;
 
-ALTER WAREHOUSE iot_xs
+ALTER WAREHOUSE COMPUTE_WH
   SET RESOURCE_MONITOR = iot_monitor;
 
 -- ============================================================
@@ -30,21 +30,21 @@ ALTER WAREHOUSE iot_xs
 
 -- Role 1: Engineer — full access, chạy pipeline
 CREATE ROLE IF NOT EXISTS iot_engineer;
-GRANT USAGE ON WAREHOUSE iot_xs                    TO ROLE iot_engineer;
+GRANT USAGE ON WAREHOUSE COMPUTE_WH                TO ROLE iot_engineer;
 GRANT USAGE ON DATABASE  iot                       TO ROLE iot_engineer;
 GRANT USAGE ON ALL SCHEMAS IN DATABASE iot         TO ROLE iot_engineer;
 GRANT ALL   ON ALL TABLES  IN DATABASE iot         TO ROLE iot_engineer;
 
 -- Role 2: Analyst — chỉ đọc Gold layer
 CREATE ROLE IF NOT EXISTS iot_analyst;
-GRANT USAGE  ON WAREHOUSE iot_xs                   TO ROLE iot_analyst;
+GRANT USAGE  ON WAREHOUSE COMPUTE_WH               TO ROLE iot_analyst;
 GRANT USAGE  ON DATABASE  iot                      TO ROLE iot_analyst;
 GRANT USAGE  ON SCHEMA    iot.gold                 TO ROLE iot_analyst;
 GRANT SELECT ON ALL TABLES IN SCHEMA iot.gold      TO ROLE iot_analyst;
 
 -- Role 3: Dashboard — service account cho Streamlit
 CREATE ROLE IF NOT EXISTS iot_dashboard;
-GRANT USAGE  ON WAREHOUSE iot_xs                   TO ROLE iot_dashboard;
+GRANT USAGE  ON WAREHOUSE COMPUTE_WH               TO ROLE iot_dashboard;
 GRANT USAGE  ON DATABASE  iot                      TO ROLE iot_dashboard;
 GRANT USAGE  ON SCHEMA    iot.gold                 TO ROLE iot_dashboard;
 GRANT SELECT ON TABLE iot.gold.fleet_metrics       TO ROLE iot_dashboard;
