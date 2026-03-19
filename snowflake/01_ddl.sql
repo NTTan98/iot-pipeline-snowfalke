@@ -1,110 +1,136 @@
+-- =============================================
+-- 01_ddl.sql: IOT Pipeline — Full DDL Setup
+-- Run order: 01_ddl → 04_silver_transform → 05_gold_kpis
+-- Run as: ACCOUNTADMIN
+-- =============================================
+
+
+-- ============ [0] ROLE & WAREHOUSE ============
 USE ROLE ACCOUNTADMIN;
 
--- 2. DATABASE + MEDALLION ARCHITECTURE
+CREATE WAREHOUSE IF NOT EXISTS iot_xs
+  WAREHOUSE_SIZE = 'X-SMALL'
+  AUTO_SUSPEND   = 60
+  AUTO_RESUME    = TRUE;
+
+USE WAREHOUSE iot_xs;
+
+
+-- ============ [1] DATABASE & SCHEMAS ============
 CREATE OR REPLACE DATABASE iot;
-CREATE SCHEMA IF NOT EXISTS bronze;    -- Raw JSON
-CREATE SCHEMA IF NOT EXISTS silver;    -- Cleaned metrics
-CREATE SCHEMA IF NOT EXISTS gold;      -- Business KPIs
 
--- 3. CONTEXT
 USE DATABASE iot;
-USE SCHEMA bronze;
-USE WAREHOUSE COMPUTE_WH;
 
--- 4. BRONZE LAYER (Raw IoT JSON)
+CREATE SCHEMA IF NOT EXISTS bronze;  -- Raw JSON (Snowpipe ingest)
+CREATE SCHEMA IF NOT EXISTS silver;  -- Cleaned + typed + hourly aggregated
+CREATE SCHEMA IF NOT EXISTS gold;    -- Business KPIs per site/hour
+
+
+-- ============ [2] BRONZE LAYER ============
+USE SCHEMA bronze;
+
 CREATE OR REPLACE TABLE device_telemetry (
-  json_data VARIANT,                   -- Raw MQTT payload
-  file_name STRING,
-  loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+  json_data  VARIANT,                                    -- Raw IoT JSON payload
+  file_name  STRING,                                     -- Source file (tracking)
+  loaded_at  TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 
--- 5. FILE FORMAT (JSON IoT)
 CREATE OR REPLACE FILE FORMAT iot_json_format
-  TYPE = 'JSON'
+  TYPE              = 'JSON'
   STRIP_OUTER_ARRAY = TRUE
-  NULL_IF = ('NULL', '');
+  NULL_IF           = ('NULL', '');
 
--- 6. CREATE STAGE CONNECT AZURE BLOB
-CREATE STAGE iotdata 
-	URL = 'azure://iotsnowflake.blob.core.windows.net/iot-data' 
-	CREDENTIALS = ( AZURE_SAS_TOKEN = '*****' ) 
-	DIRECTORY = ( ENABLE = true );  
+-- ⚠️  Thay YOUR_SAS_TOKEN bằng SAS Token thực từ Azure Portal
+-- Nếu token hết hạn, chạy lại lệnh sau (không cần tạo lại stage):
+--   ALTER STAGE iotdata SET CREDENTIALS = (AZURE_SAS_TOKEN = 'new_token');
+CREATE OR REPLACE STAGE iotdata
+  URL         = 'azure://iotsnowflake.blob.core.windows.net/iot-data'
+  CREDENTIALS = (AZURE_SAS_TOKEN = 'YOUR_SAS_TOKEN')
+  DIRECTORY   = (ENABLE = TRUE);
 
--- 7. CREATE Notification Integration
-CREATE OR REPLACE NOTIFICATION INTEGRATION AZURE_SNOWPIPE_NI
-  TYPE = QUEUE
-  ENABLED = TRUE
-  NOTIFICATION_PROVIDER = AZURE_STORAGE_QUEUE
-  AZURE_TENANT_ID = <tenantid>
-  AZURE_STORAGE_QUEUE_PRIMARY_URI = <queue URL>;
 
--- 8. consent get URL and get information
-DESC NOTIFICATION INTEGRATION AZURE_SNOWPIPE_NI;
+-- ============ [3] AZURE NOTIFICATION INTEGRATION ============
+-- ⚠️  Thay thế 2 giá trị sau trước khi chạy:
+--   YOUR_TENANT_ID  : Azure Portal → Azure Active Directory → Overview → Tenant ID
+--   YOUR_QUEUE_URL  : Storage Account → Queues → chọn queue → copy URL
+CREATE OR REPLACE NOTIFICATION INTEGRATION azure_snowpipe_ni
+  TYPE                            = QUEUE
+  ENABLED                         = TRUE
+  NOTIFICATION_PROVIDER           = AZURE_STORAGE_QUEUE
+  AZURE_TENANT_ID                 = 'YOUR_TENANT_ID'
+  AZURE_STORAGE_QUEUE_PRIMARY_URI = 'YOUR_QUEUE_URL';
 
--- 9. GRANT QUYỀN
-GRANT USAGE ON INTEGRATION AZURE_SNOWPIPE_NI TO ROLE SYSADMIN;
+-- Bước bắt buộc: lấy consent URL → mở browser → đăng nhập Azure → Accept
+DESC NOTIFICATION INTEGRATION azure_snowpipe_ni;
 
--- 10. Create Pipe
-CREATE OR REPLACE PIPE IOT_PIPE
+GRANT USAGE ON INTEGRATION azure_snowpipe_ni TO ROLE SYSADMIN;
+
+
+-- ============ [4] SNOWPIPE (Auto-Ingest) ============
+CREATE OR REPLACE PIPE iot_pipe
   AUTO_INGEST = TRUE
   INTEGRATION = 'AZURE_SNOWPIPE_NI'
-  AS COPY INTO IOT.BRONZE.DEVICE_TELEMETRY (JSON_DATA, FILE_NAME)
+AS
+  COPY INTO iot.bronze.device_telemetry (json_data, file_name)
   FROM (
-      SELECT 
-      $1, 
-      METADATA$FILENAME 
-  FROM @IOT.BRONZE.IOTDATA
+    SELECT $1, METADATA$FILENAME
+    FROM @iot.bronze.iotdata
   )
-FILE_FORMAT = (FORMAT_NAME = 'IOT.BRONZE.IOT_JSON_FORMAT')
-ON_ERROR = 'CONTINUE';
+  FILE_FORMAT = (FORMAT_NAME = 'iot.bronze.iot_json_format')
+  ON_ERROR    = 'CONTINUE';
 
--- 11.TẠO SILVER TABLE (Clean + Typed + Aggregated)
-USE DATABASE IOT;
-USE SCHEMA SILVER;
 
-CREATE OR REPLACE TABLE DEVICE_TELEMETRY_HOURLY (
-  DEVICE_ID VARCHAR(50),
-  SITE_ID VARCHAR(50),
-  HOUR_BUCKET TIMESTAMP_NTZ,  -- Parse từ timestamp, truncate giờ
-  AVG_TEMPERATURE FLOAT,
-  MIN_TEMPERATURE FLOAT,
-  MAX_TEMPERATURE FLOAT,
-  AVG_HUMIDITY FLOAT,
-  MIN_HUMIDITY FLOAT,
-  MAX_HUMIDITY FLOAT,
-  AVG_BATTERY_PCT FLOAT,
-  SIGNAL_RSSI_AVG INT,
-  UPTIME_HOURS FLOAT,
-  DATA_USAGE_MB FLOAT,
-  RECORD_COUNT INT,
-  HAS_TEMPERATURE_ALERT BOOLEAN,  -- Business logic
-  HAS_HUMIDITY_ALERT BOOLEAN,
-  LOAD_TS TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+-- ============ [5] SILVER LAYER ============
+USE SCHEMA silver;
+
+CREATE OR REPLACE TABLE device_telemetry_hourly (
+  device_id             VARCHAR(50),
+  site_id               VARCHAR(50),
+  hour_bucket           TIMESTAMP_NTZ,    -- Aggregated theo giờ
+  avg_temperature       FLOAT,
+  min_temperature       FLOAT,
+  max_temperature       FLOAT,
+  avg_humidity          FLOAT,
+  min_humidity          FLOAT,
+  max_humidity          FLOAT,
+  avg_battery_pct       FLOAT,
+  signal_rssi_avg       INT,
+  uptime_hours          FLOAT,
+  data_usage_mb         FLOAT,
+  record_count          INT,
+  has_temperature_alert BOOLEAN,          -- Alert flag (business logic)
+  has_humidity_alert    BOOLEAN,
+  load_ts               TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
 );
 
 
--- -- 8. RBAC SECURITY
--- CREATE ROLE IF NOT EXISTS user_analyst;
--- GRANT USAGE ON DATABASE iot TO ROLE user_analyst;
--- GRANT USAGE ON ALL SCHEMAS IN DATABASE iot TO ROLE user_analyst;
--- GRANT SELECT ON gold.fleet_metrics TO ROLE user_analyst;
--- GRANT USAGE ON WAREHOUSE COMPUTE_WH TO ROLE user_analyst;
+-- ============ [6] GOLD LAYER ============
+USE SCHEMA gold;
 
--- -- 9. RESOURCE MONITOR 
--- DROP RESOURCE MONITOR IF EXISTS user_monitor;
--- CREATE RESOURCE MONITOR user_monitor
---   CREDIT_QUOTA = 10
---   TRIGGERS ON 80 PERCENT DO NOTIFY
---   ON 100 PERCENT DO SUSPEND;
+CREATE OR REPLACE TABLE fleet_metrics (
+  analysis_hour        TIMESTAMP_NTZ,    -- Hour bucket (natural key part 1)
+  site_id              VARCHAR(50),      -- Site name (natural key part 2)
+  active_devices       INT,              -- COUNT DISTINCT devices trong giờ
+  avg_temperature      FLOAT,
+  max_temperature      FLOAT,
+  min_temperature      FLOAT,
+  avg_humidity         FLOAT,
+  avg_battery_pct      FLOAT,
+  total_data_usage_mb  FLOAT,
+  avg_uptime_hours     FLOAT,
+  total_alerts         INT,              -- Tổng alert (temp OR humidity)
+  alert_temp_count     INT,
+  alert_humidity_count INT,
+  total_records        INT,
+  loaded_at            TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
+);
 
--- ALTER WAREHOUSE COMPUTE_WH SET RESOURCE_MONITOR = user_monitor;
 
--- -- 10. VERIFY EVERYTHING ✅
--- SELECT 'SUCCESS: DDL Complete!' AS status;
--- SHOW DATABASES LIKE 'iot';
--- SHOW SCHEMAS IN DATABASE iot;
--- SHOW TABLES IN SCHEMA bronze;
--- SHOW TABLES IN SCHEMA silver;
--- SHOW TABLES IN SCHEMA gold;
--- SHOW WAREHOUSES LIKE 'iot%';
--- SHOW FILE FORMATS LIKE 'iot%';
+-- ============ [7] VERIFY ============
+SHOW DATABASES  LIKE 'iot';
+SHOW SCHEMAS    IN DATABASE iot;
+SHOW TABLES     IN SCHEMA bronze;
+SHOW TABLES     IN SCHEMA silver;
+SHOW TABLES     IN SCHEMA gold;
+SHOW WAREHOUSES LIKE 'iot%';
+SHOW FILE FORMATS LIKE 'iot%';
