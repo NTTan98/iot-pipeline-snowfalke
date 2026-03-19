@@ -58,6 +58,28 @@ ACCOUNTADMIN
 
 ---
 
+## ⏳ Time Travel & Zero-Copy Cloning
+
+Snowflake lưu lịch sử thay đổi data trong một khoảng thời gian — cho phép query hoặc restore data tại bất kỳ thời điểm nào mà không cần backup thủ công.
+
+**4 use case thực tế:**
+
+| Use Case | Mô tả | Tần suất |
+|---|---|---|
+| 🔍 Audit & debug | "Tại sao số liệu hôm nay khác hôm qua?" | Hàng ngày |
+| 📅 Báo cáo tại thời điểm cụ thể | Lấy số liệu cuối tháng đúng ngày | Tháng |
+| ↔️ So sánh trước/sau transform | Kiểm tra transform mới có ảnh hưởng data | Mỗi deploy |
+| 🛑 Restore xóa nhầm | `UNDROP TABLE` — khôi phục tức thì | Khẩn cấp |
+
+**Zero-Copy Cloning** — clone toàn bộ database tức thì, không tốn thêm storage cho đến khi có thay đổi:
+```sql
+CREATE DATABASE iot_dev CLONE iot;  -- có ngay bản dev để test
+```
+
+Xem các query mẫu trong [`snowflake/08_time_travel.sql`](./snowflake/08_time_travel.sql)
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -70,7 +92,8 @@ ACCOUNTADMIN
 │   ├── 04_gold.sql                   # Gold table + Stream + Task MERGE (10 min)
 │   ├── 05_verify.sql                 # Pipeline health check
 │   ├── 06_backfill.sql               # Manual backfill Silver → Gold (chạy 1 lần)
-│   └── 07_security.sql               # RBAC + Resource Monitor + Data Masking
+│   ├── 07_security.sql               # RBAC + Resource Monitor + Data Masking
+│   └── 08_time_travel.sql            # Time Travel (audit, restore) + Zero-Copy Cloning
 ├── Azure/
 │   └── snowflake-eventgrid-setup.ps1  # PowerShell: tạo Event Grid + Queue tự động
 ├── dashboard/
