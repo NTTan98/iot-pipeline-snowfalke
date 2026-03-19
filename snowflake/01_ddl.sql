@@ -9,7 +9,7 @@ CREATE SCHEMA IF NOT EXISTS gold;      -- Business KPIs
 -- 3. CONTEXT
 USE DATABASE iot;
 USE SCHEMA bronze;
-USE WAREHOUSE iot_xs;
+USE WAREHOUSE COMPUTE_WH;
 
 -- 4. BRONZE LAYER (Raw IoT JSON)
 CREATE OR REPLACE TABLE device_telemetry (
@@ -83,28 +83,12 @@ CREATE OR REPLACE TABLE DEVICE_TELEMETRY_HOURLY (
 );
 
 
-
--- -- 7. GOLD LAYER (Hourly KPIs)
--- USE SCHEMA gold;
--- CREATE OR REPLACE TABLE fleet_metrics (
---   analysis_hour TIMESTAMP_NTZ,     -- Hour bucket
---   site_id STRING,
---   active_devices INT,
---   total_alerts INT,
---   avg_uptime_pct FLOAT,
---   total_data_usage_mb FLOAT,
---   avg_temperature FLOAT,
---   max_temperature FLOAT,
---   alert_high_count INT,
---   loaded_at TIMESTAMP_NTZ DEFAULT CURRENT_TIMESTAMP()
--- );
-
 -- -- 8. RBAC SECURITY
 -- CREATE ROLE IF NOT EXISTS user_analyst;
 -- GRANT USAGE ON DATABASE iot TO ROLE user_analyst;
 -- GRANT USAGE ON ALL SCHEMAS IN DATABASE iot TO ROLE user_analyst;
 -- GRANT SELECT ON gold.fleet_metrics TO ROLE user_analyst;
--- GRANT USAGE ON WAREHOUSE iot_xs TO ROLE user_analyst;
+-- GRANT USAGE ON WAREHOUSE COMPUTE_WH TO ROLE user_analyst;
 
 -- -- 9. RESOURCE MONITOR 
 -- DROP RESOURCE MONITOR IF EXISTS user_monitor;
@@ -113,7 +97,7 @@ CREATE OR REPLACE TABLE DEVICE_TELEMETRY_HOURLY (
 --   TRIGGERS ON 80 PERCENT DO NOTIFY
 --   ON 100 PERCENT DO SUSPEND;
 
--- ALTER WAREHOUSE iot_xs SET RESOURCE_MONITOR = user_monitor;
+-- ALTER WAREHOUSE COMPUTE_WH SET RESOURCE_MONITOR = user_monitor;
 
 -- -- 10. VERIFY EVERYTHING ✅
 -- SELECT 'SUCCESS: DDL Complete!' AS status;

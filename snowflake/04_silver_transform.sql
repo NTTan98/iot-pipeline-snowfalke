@@ -8,7 +8,7 @@ APPEND_ONLY = TRUE;
 
 -- 2. TASK tự động chạy mỗi 5 phút (Silver transformation)
 create or replace task IOT.SILVER.SILVER_IOT_TASK
-	warehouse=iot_xs
+	warehouse=COMPUTE_WH
 	schedule='5 MINUTE'
 	when SYSTEM$STREAM_HAS_DATA('BRONZE_IOT_STREAM')
 	as INSERT INTO SILVER.DEVICE_TELEMETRY_HOURLY (

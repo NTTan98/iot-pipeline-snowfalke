@@ -17,7 +17,7 @@ def init_connection():
         account=os.getenv("SNOWFLAKE_ACCOUNT"),
         user=os.getenv("SNOWFLAKE_USER"),
         password=os.getenv("SNOWFLAKE_PASSWORD"),
-        warehouse="iot_xs",
+        warehouse="COMPUTE_WH",
         database="iot",
         schema="gold"
     )
