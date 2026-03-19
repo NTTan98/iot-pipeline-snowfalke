@@ -25,7 +25,7 @@ End-to-end real-time IoT data pipeline using **Snowflake + Azure Blob Storage**,
         │ Task: every 10 min (MERGE)
         ▼
  GOLD.FLEET_METRICS               ← Business KPIs per site/hour
-        │
+        │                         (also: FLEET_METRICS_DYNAMIC via Dynamic Table)
         ▼
 [Streamlit Dashboard]             ← Live KPI cards + charts
 ```
@@ -104,6 +104,36 @@ Xem các query mẫu trong [`snowflake/08_time_travel.sql`](./snowflake/08_time_
 
 ---
 
+## ⚡ Dynamic Tables
+
+Giải pháp **declarative** thay thế Stream + Task — khai báo **"muốn data trông như thế nào"**, Snowflake tự động lo refresh, incremental update, và dependency tracking.
+
+**Stream + Task vs Dynamic Table:**
+
+| | Stream + Task (`04_gold.sql`) | Dynamic Table (`09_dynamic_tables.sql`) |
+|---|---|---|
+| Số object cần tạo | Stream + Task + Table = 3 | 1 Dynamic Table |
+| Số dòng code | ~40 dòng | ~15 dòng |
+| Monitor | Tự check task status | `SHOW DYNAMIC TABLES` |
+| Khi Silver có data mới | Task chạy theo schedule | Detect tự động |
+| Debug khi lỗi | Xem task history, stream offset | Built-in lag monitoring |
+
+**`TARGET_LAG`** — tham số quan trọng nhất:
+
+| Giá trị | Ý nghĩa | Phù hợp |
+|---|---|---|
+| `'1 minute'` | Gần real-time | Alert system, trading |
+| `'10 minutes'` | Cân bằng freshness vs cost | IoT dashboard (project này) |
+| `'1 hour'` | Tiết kiệm credit | Báo cáo không cần real-time |
+
+**Khi nào dùng Dynamic Table vs Stream + Task:**
+- ✅ Dùng Dynamic Table: logic SELECT/GROUP BY đơn giản, muốn giảm số object maintain
+- ❌ Giữ Stream + Task: cần gửi notification, MERGE phức tạp, kiểm soát chính xác thời điểm chạy
+
+Xem implementation trong [`snowflake/09_dynamic_tables.sql`](./snowflake/09_dynamic_tables.sql)
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -117,7 +147,8 @@ Xem các query mẫu trong [`snowflake/08_time_travel.sql`](./snowflake/08_time_
 │   ├── 05_verify.sql                 # Pipeline health check
 │   ├── 06_backfill.sql               # Manual backfill Silver → Gold (chạy 1 lần)
 │   ├── 07_security.sql               # RBAC + Resource Monitor + Data Masking
-│   └── 08_time_travel.sql            # Time Travel (audit, restore) + Zero-Copy Cloning
+│   ├── 08_time_travel.sql            # Time Travel (audit, restore) + Zero-Copy Cloning
+│   └── 09_dynamic_tables.sql         # Dynamic Table — alternative Gold layer
 ├── Azure/
 │   └── snowflake-eventgrid-setup.ps1  # PowerShell: tạo Event Grid + Queue tự động
 ├── dashboard/
@@ -161,6 +192,7 @@ cp .env.example .env   # điền credentials vào .env
 | 3 | `snowflake/03_silver.sql` | Tạo Silver table, Stream + Task (Bronze → Silver) |
 | 4 | `snowflake/04_gold.sql` | Tạo Gold table, Stream + Task MERGE (Silver → Gold) |
 | 5 | `snowflake/07_security.sql` | RBAC + Resource Monitor + Data Masking |
+| 6 *(optional)* | `snowflake/09_dynamic_tables.sql` | Alternative Gold layer dùng Dynamic Table |
 
 > ⚠️ `02_bronze.sql` có placeholder cần điền trước khi chạy: `YOUR_SAS_TOKEN`, `YOUR_TENANT_ID`, `YOUR_QUEUE_URL`.
 
