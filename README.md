@@ -32,27 +32,54 @@ End-to-end real-time IoT data pipeline using **Snowflake + Azure Blob Storage**,
 
 ---
 
+## 🔐 Security & Access Control
+
+```
+ACCOUNTADMIN
+    │
+    ├── SYSADMIN
+    │       ├── iot_engineer   → Full access (Bronze + Silver + Gold)
+    │       ├── iot_analyst    → Read-only  (Gold only)
+    │       └── iot_dashboard  → Read-only  (fleet_metrics only)
+    │
+    └── SECURITYADMIN
+            └── Quản lý user, role, masking policy
+```
+
+| Role | Bronze | Silver | Gold | Warehouse |
+|---|---|---|---|---|
+| `iot_engineer` | ✅ Full | ✅ Full | ✅ Full | ✅ COMPUTE_WH |
+| `iot_analyst` | ❌ | ❌ | ✅ SELECT | ✅ COMPUTE_WH |
+| `iot_dashboard` | ❌ | ❌ | ✅ fleet_metrics only | ✅ COMPUTE_WH |
+
+**Resource Monitor:** `iot_monitor` — notify 80%, suspend warehouse tự động khi đạt 100% credit (giới hạn 10 credits/tháng)
+
+**Data Masking:** Column `file_name` trong Bronze — `iot_engineer` thấy full, các role khác thấy `***`
+
+---
+
 ## 📁 Project Structure
 
 ```
 ├── generator/
-│   └── iot_generator.py         # Sinh 1,000 bản ghi IoT → output_json/
+│   └── iot_generator.py              # Sinh 1,000 bản ghi IoT → output_json/
 ├── snowflake/
-│   ├── 01_setup.sql             # Warehouse + Database + Schemas
-│   ├── 02_bronze.sql            # Bronze table + File format + Stage + Snowpipe
-│   ├── 03_silver.sql            # Silver table + Stream + Task (5 min)
-│   ├── 04_gold.sql              # Gold table + Stream + Task MERGE (10 min)
-│   ├── 05_verify.sql            # Pipeline health check
-│   └── 06_backfill.sql          # Manual backfill Silver → Gold (chạy 1 lần)
+│   ├── 01_setup.sql                  # Warehouse COMPUTE_WH + Database + Schemas
+│   ├── 02_bronze.sql                 # Bronze table + File format + Stage + Snowpipe
+│   ├── 03_silver.sql                 # Silver table + Stream + Task (5 min)
+│   ├── 04_gold.sql                   # Gold table + Stream + Task MERGE (10 min)
+│   ├── 05_verify.sql                 # Pipeline health check
+│   ├── 06_backfill.sql               # Manual backfill Silver → Gold (chạy 1 lần)
+│   └── 07_security.sql               # RBAC + Resource Monitor + Data Masking
 ├── Azure/
-│   └── snowflake-eventgrid-setup.ps1  # PowerShell script: tạo Event Grid + Queue tự động
+│   └── snowflake-eventgrid-setup.ps1  # PowerShell: tạo Event Grid + Queue tự động
 ├── dashboard/
-│   └── streamlit_app.py         # Streamlit dashboard kết nối Gold layer
+│   └── streamlit_app.py              # Streamlit dashboard kết nối Gold layer
 ├── help/
-│   └── snowflake_helper_queries.md  # Queries tiện ích: debug, reset, monitor
-├── note.md                      # Lessons learned & troubleshooting
-├── .env.example                 # Template credentials
-└── requirements.txt             # Python dependencies (pinned)
+│   └── snowflake_helper_queries.md   # Queries tiện ích: debug, reset, monitor
+├── note.md                           # Lessons learned & troubleshooting
+├── .env.example                      # Template credentials
+└── requirements.txt                  # Python dependencies (pinned)
 ```
 
 ---
@@ -74,7 +101,7 @@ cp .env.example .env   # điền credentials vào .env
 
 ### 3. Setup Azure Infrastructure
 ```powershell
-# Tự động tạo Event Grid + Storage Queue bằng PowerShell:
+# Tự động tạo Event Grid + Storage Queue:
 .\Azure\snowflake-eventgrid-setup.ps1
 ```
 
@@ -82,10 +109,11 @@ cp .env.example .env   # điền credentials vào .env
 
 | Bước | File | Nội dung |
 |---|---|---|
-| 1 | `snowflake/01_setup.sql` | Tạo warehouse `iot_xs`, database `iot`, 3 schemas |
+| 1 | `snowflake/01_setup.sql` | Tạo warehouse `COMPUTE_WH`, database `iot`, 3 schemas |
 | 2 | `snowflake/02_bronze.sql` | Tạo Bronze table, Stage (Azure), Snowpipe |
 | 3 | `snowflake/03_silver.sql` | Tạo Silver table, Stream + Task (Bronze → Silver) |
 | 4 | `snowflake/04_gold.sql` | Tạo Gold table, Stream + Task MERGE (Silver → Gold) |
+| 5 | `snowflake/07_security.sql` | RBAC + Resource Monitor + Data Masking |
 
 > ⚠️ `02_bronze.sql` có placeholder cần điền trước khi chạy: `YOUR_SAS_TOKEN`, `YOUR_TENANT_ID`, `YOUR_QUEUE_URL`.
 
@@ -99,7 +127,6 @@ PUT file://output_json/*.json @IOT.BRONZE.IOTDATA;
 
 ### 6. Verify Pipeline
 ```sql
--- Kiểm tra row counts + task/pipe/stream status
 snowflake/05_verify.sql
 ```
 
@@ -127,7 +154,7 @@ Mọi thứ đều dùng MERGE nên an toàn — không duplicate dù chạy nhi
 SNOWFLAKE_ACCOUNT=your_org-your_account   # VD: abc123-xy12345
 SNOWFLAKE_USER=your_username
 SNOWFLAKE_PASSWORD=your_password
-SNOWFLAKE_WAREHOUSE=iot_xs
+SNOWFLAKE_WAREHOUSE=COMPUTE_WH
 SNOWFLAKE_DATABASE=iot
 SNOWFLAKE_SCHEMA=gold
 ```
@@ -168,7 +195,7 @@ DESC NOTIFICATION INTEGRATION azure_snowpipe_ni;
 | Column | Type | Description |
 |---|---|---|
 | json_data | VARIANT | Raw IoT JSON payload |
-| file_name | STRING | Source file (tracking) |
+| file_name | STRING | Source file (tracking) — masked for non-engineers |
 | loaded_at | TIMESTAMP_NTZ | Ingest timestamp |
 
 ### Silver — `IOT.SILVER.DEVICE_TELEMETRY_HOURLY`
@@ -199,7 +226,7 @@ Xem chi tiết trong [`note.md`](./note.md) và [`help/snowflake_helper_queries.
 - `Copy executed with 0 files processed` → kiểm tra file format & stage path
 - `Stage / Integration does not exist or not authorized` → kiểm tra GRANT
 - Task không chạy → kiểm tra `SYSTEM$STREAM_HAS_DATA` và task state
-- Cost optimization: auto-suspend 60s, warehouse chỉ chạy khi task active
+- Cost optimization: auto-suspend 60s, Resource Monitor giới hạn 10 credits/tháng
 
 ---
 
