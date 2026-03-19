@@ -79,6 +79,15 @@ Khi thiết kế theo kiến trúc Medallion (Bronze -> Silver -> Gold), tầng 
 ### Time Travel
 - Cho phép xem lại dữ liệu quá khứ bằng cách thêm `AT (OFFSET => -1800)` hoặc `BEFORE (STATEMENT => 'query_id')` vào cuối lệnh SELECT.
 - **Cảnh báo:** Bản Standard mặc định chỉ lưu time travel trong **1 ngày (24h)**. Qua ngày hôm sau là bạn không thể "undrop" hay khôi phục dữ liệu bị lỡ tay xóa.
+- **Lỗi `Time travel data is not available`:** Xảy ra khi bảng mới được tạo chưa đủ lâu, hoặc `DATA_RETENTION_TIME_IN_DAYS = 0`. Kiểm tra bằng `SHOW PARAMETERS LIKE 'DATA_RETENTION_TIME_IN_DAYS' IN TABLE <table>;`
+- **So sánh 2 thời điểm:** JOIN bảng với chính nó ở 2 offset khác nhau để xem column nào thay đổi:
+```sql
+SELECT now.site_id, now.avg_temperature AS temp_now, old.avg_temperature AS temp_old
+FROM gold.fleet_metrics AS now
+JOIN gold.fleet_metrics AT (OFFSET => -1800) AS old
+  ON now.site_id = old.site_id AND now.analysis_hour = old.analysis_hour
+WHERE now.avg_temperature != old.avg_temperature;
+```
 
 ### Lấy Tên File Gốc (Metadata)
 Khi dùng `COPY INTO`, có thể bóc tách tên file và lưu vào bảng để tiện tracking:
@@ -88,3 +97,107 @@ FROM (
     SELECT $1, METADATA$FILENAME 
     FROM @IOT.BRONZE.IOTDATA
 );
+```
+
+---
+
+## 🏗️ 5. KIẾN TRÚC GOLD LAYER: DYNAMIC TABLE vs STREAM + TASK
+
+> Ghi chú từ 2026-03-19: Project này có **2 bảng Gold song song** do quá trình migrate.
+
+### Hai bảng Gold hiện tại
+
+| | `gold.fleet_metrics` | `gold.fleet_metrics_dynamic` |
+|---|---|---|
+| **Tạo bởi** | `04_gold.sql` (Stream + Task + MERGE) | `09_dynamic_tables.sql` (Dynamic Table) |
+| **Cơ chế refresh** | Task chạy theo schedule, MERGE vào | Snowflake tự động theo TARGET_LAG |
+| **Số objects cần maintain** | Stream + Task + Table = 3 objects | 1 Dynamic Table |
+| **Time Travel** | ✅ Có | ❌ Không hỗ trợ |
+| **Khuyến nghị** | Dùng khi cần MERGE phức tạp / gửi notification | Dùng cho aggregate đơn giản ✅ |
+
+### Cách Dynamic Table hoạt động
+- **Không phải append** — tính lại toàn bộ query từ Silver mỗi lần refresh
+- **GROUP BY logic:** 2 hour_bucket × 5 sites = **10 groups** trong Gold
+- Nếu Silver có thêm row **cùng giờ + cùng site** → Gold cập nhật giá trị (Statistics: `+1 / -1`)
+- Nếu Silver có thêm row **giờ mới** → Gold thêm group mới (Statistics: `+5 / -0`)
+- Nếu Silver không có data mới → Gold **không refresh**, không tốn compute
+
+### Đọc Refresh History
+```
+Source Data Timestamp = Thời điểm data Silver mà Gold đã đọc tới
+Refresh Duration      = Thời gian chạy query để rebuild Gold
+Refresh Lag           = Độ trễ thực tế so với Silver (phải < TARGET_LAG)
+Statistics +X / -Y    = X rows được thêm / Y rows bị xóa sau refresh
+```
+
+### Monitor lag thực tế
+```sql
+SELECT name, target_lag, scheduling_state, data_timestamp,
+       DATEDIFF('minute', data_timestamp, CURRENT_TIMESTAMP()) AS current_lag_minutes
+FROM information_schema.dynamic_tables
+WHERE name = 'FLEET_METRICS_DYNAMIC';
+```
+
+### So sánh Silver vs Gold (kiểm tra đồng bộ)
+```sql
+SELECT
+    COUNT(DISTINCT s.hour_bucket || s.site_id) AS silver_groups,
+    COUNT(DISTINCT g.analysis_hour || g.site_id) AS gold_groups
+FROM silver.device_telemetry_hourly s
+FULL OUTER JOIN gold.fleet_metrics_dynamic g
+  ON DATE_TRUNC('hour', s.hour_bucket) = g.analysis_hour
+ AND s.site_id = g.site_id;
+```
+
+---
+
+## 🚨 6. TROUBLESHOOTING DYNAMIC TABLE
+
+### Lỗi: `Insufficient privileges to operate on schema 'GOLD'`
+- **Nguyên nhân:** Dynamic Table là object type riêng, **không nằm trong `ALL ON TABLES`**
+- **Fix:**
+```sql
+USE ROLE ACCOUNTADMIN;
+GRANT CREATE DYNAMIC TABLE ON SCHEMA iot.gold TO ROLE SYSADMIN;
+GRANT CREATE DYNAMIC TABLE ON SCHEMA iot.silver TO ROLE SYSADMIN;
+GRANT USAGE ON SCHEMA iot.gold TO ROLE SYSADMIN;
+GRANT USAGE ON SCHEMA iot.silver TO ROLE SYSADMIN;
+```
+- **Hoặc đơn giản hơn:** Chạy thẳng `CREATE DYNAMIC TABLE` bằng `ROLE ACCOUNTADMIN`
+
+### Lỗi: `invalid identifier 'AVG_UPTIME_HOURS'`
+- **Nguyên nhân:** Tên column trong Silver không khớp với query Gold
+- **Kiểm tra:** `DESC TABLE iot.silver.device_telemetry_hourly;`
+- **Tên đúng trong Silver:**
+  - `uptime_hours` (không có prefix `avg_`)
+  - `data_usage_mb` (không có prefix `total_`)
+  - `record_count` (dùng `SUM(record_count)`, không phải `COUNT(*)`)
+
+### Lỗi: `warehouse 'COMPUTE_WH' is missing`
+- **Nguyên nhân:** Warehouse bị dropped hoặc SYSADMIN thiếu quyền USAGE
+- **Fix TH1 - Tạo lại warehouse:**
+```sql
+CREATE WAREHOUSE IF NOT EXISTS COMPUTE_WH
+  WAREHOUSE_SIZE = 'XSMALL' AUTO_SUSPEND = 60 AUTO_RESUME = TRUE;
+```
+- **Fix TH2 - Grant quyền:**
+```sql
+GRANT USAGE ON WAREHOUSE COMPUTE_WH TO ROLE SYSADMIN;
+```
+- **Fix TH3 - Đổi warehouse trong Dynamic Table:**
+```sql
+ALTER DYNAMIC TABLE gold.fleet_metrics_dynamic SET WAREHOUSE = <tên_đúng>;
+```
+- **Sau khi fix:** `ALTER DYNAMIC TABLE gold.fleet_metrics_dynamic REFRESH;`
+
+### Độ trễ tích lũy qua các tầng
+```
+Raw IoT Device
+   ↓  ~vài giây    (Stage → Bronze stream)
+Bronze
+   ↓  ~vài giây    (Task chạy theo schedule)
+Silver
+   ↓  ≤ 10 phút   (Dynamic Table TARGET_LAG)
+Gold (fleet_metrics_dynamic)
+```
+Tổng độ trễ từ device đến Gold: **~10–11 phút**
