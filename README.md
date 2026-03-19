@@ -60,21 +60,45 @@ ACCOUNTADMIN
 
 ## ⏳ Time Travel & Zero-Copy Cloning
 
-Snowflake lưu lịch sử thay đổi data trong một khoảng thời gian — cho phép query hoặc restore data tại bất kỳ thời điểm nào mà không cần backup thủ công.
+### Time Travel
 
-**4 use case thực tế:**
+Snowflake tự động lưu lịch sử thay đổi data — không cần backup thủ công, có thể query hoặc restore tại bất kỳ thời điểm nào trong khoảng retention (trial = 1 ngày, Enterprise = 90 ngày).
+
+**4 use case thực tế — tần suất dùng từ cao đến thấp:**
 
 | Use Case | Mô tả | Tần suất |
 |---|---|---|
-| 🔍 Audit & debug | "Tại sao số liệu hôm nay khác hôm qua?" | Hàng ngày |
-| 📅 Báo cáo tại thời điểm cụ thể | Lấy số liệu cuối tháng đúng ngày | Tháng |
-| ↔️ So sánh trước/sau transform | Kiểm tra transform mới có ảnh hưởng data | Mỗi deploy |
-| 🛑 Restore xóa nhầm | `UNDROP TABLE` — khôi phục tức thì | Khẩn cấp |
+| 🔍 **Audit & debug** | "Tại sao số liệu hôm nay khác hôm qua?" — so sánh row count theo giờ | Hàng ngày |
+| ↔️ **So sánh trước/sau transform** | Kiểm tra transform mới có ảnh hưởng data không trước khi deploy | Mỗi deploy |
+| 📅 **Báo cáo tại thời điểm cụ thể** | Lấy số liệu cuối tháng đúng ngày — không bị ảnh hưởng bởi data mới | Hàng tháng |
+| 🛑 **Restore xóa nhầm** | `UNDROP TABLE` — khôi phục tức thì, không cần DBA can thiệp | Khẩn cấp |
 
-**Zero-Copy Cloning** — clone toàn bộ database tức thì, không tốn thêm storage cho đến khi có thay đổi:
-```sql
-CREATE DATABASE iot_dev CLONE iot;  -- có ngay bản dev để test
+### Zero-Copy Cloning
+
+Giải quyết vấn đề cốt lõi: có bản copy data để test/backup **mà không tốn thêm storage và thời gian chờ**. Snowflake chỉ copy metadata (con trỏ), data vật lý vẫn share chung cho đến khi có thay đổi.
+
 ```
+Lúc clone:                  Sau khi thay đổi iot_staging:
+
+iot          ──┬            iot          ── shared blocks (giữ nguyên)
+               ├── shared
+iot_staging  ──┘            iot_staging  ── new blocks (chỉ phần thay đổi)
+                                          + shared blocks
+```
+
+**3 mục đích chính:**
+
+| Mục đích | Ví dụ |
+|---|---|
+| Môi trường dev/staging từ data thật | `CREATE DATABASE iot_staging CLONE iot` — dev team test ngay không ảnh hưởng production |
+| Backup trước script nguy hiểm | `CREATE TABLE fleet_metrics_backup CLONE fleet_metrics` — restore ngay nếu sai |
+| Test transform mới an toàn | Clone schema → chạy thử → nếu đúng mới apply lên production |
+
+| | Traditional Copy | Zero-Copy Clone |
+|---|---|---|
+| Thời gian (TB data) | Hàng giờ | Vài giây |
+| Storage | x2 | Chỉ tính phần thay đổi |
+| Sync lại | Phải copy lại từ đầu | Clone lại bất cứ lúc nào |
 
 Xem các query mẫu trong [`snowflake/08_time_travel.sql`](./snowflake/08_time_travel.sql)
 
