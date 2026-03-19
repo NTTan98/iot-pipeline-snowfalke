@@ -36,18 +36,23 @@ End-to-end real-time IoT data pipeline using **Snowflake + Azure Blob Storage**,
 
 ```
 ├── generator/
-│   └── iot-genertor.py      # Sinh 1,000 bản ghi IoT → output_json/
+│   └── iot_generator.py         # Sinh 1,000 bản ghi IoT → output_json/
 ├── snowflake/
-│   ├── 01_setup.sql         # Warehouse + Database + Schemas
-│   ├── 02_bronze.sql        # Bronze table + File format + Stage + Snowpipe
-│   ├── 03_silver.sql        # Silver table + Stream + Task (5 min)
-│   ├── 04_gold.sql          # Gold table + Stream + Task MERGE (10 min)
-│   └── 05_verify.sql        # Pipeline health check (row counts, task/pipe status)
+│   ├── 01_setup.sql             # Warehouse + Database + Schemas
+│   ├── 02_bronze.sql            # Bronze table + File format + Stage + Snowpipe
+│   ├── 03_silver.sql            # Silver table + Stream + Task (5 min)
+│   ├── 04_gold.sql              # Gold table + Stream + Task MERGE (10 min)
+│   ├── 05_verify.sql            # Pipeline health check
+│   └── 06_backfill.sql          # Manual backfill Silver → Gold (chạy 1 lần)
+├── Azure/
+│   └── snowflake-eventgrid-setup.ps1  # PowerShell script: tạo Event Grid + Queue tự động
 ├── dashboard/
-│   └── streamlit_app.py     # Streamlit dashboard kết nối Gold layer
-├── note.md                  # Lessons learned & troubleshooting
-├── .env.example             # Template credentials
-└── requirements.txt
+│   └── streamlit_app.py         # Streamlit dashboard kết nối Gold layer
+├── help/
+│   └── snowflake_helper_queries.md  # Queries tiện ích: debug, reset, monitor
+├── note.md                      # Lessons learned & troubleshooting
+├── .env.example                 # Template credentials
+└── requirements.txt             # Python dependencies (pinned)
 ```
 
 ---
@@ -67,7 +72,13 @@ pip install -r requirements.txt
 cp .env.example .env   # điền credentials vào .env
 ```
 
-### 3. Chạy Snowflake Scripts (theo đúng thứ tự)
+### 3. Setup Azure Infrastructure
+```powershell
+# Tự động tạo Event Grid + Storage Queue bằng PowerShell:
+.\Azure\snowflake-eventgrid-setup.ps1
+```
+
+### 4. Chạy Snowflake Scripts (theo đúng thứ tự)
 
 | Bước | File | Nội dung |
 |---|---|---|
@@ -76,29 +87,36 @@ cp .env.example .env   # điền credentials vào .env
 | 3 | `snowflake/03_silver.sql` | Tạo Silver table, Stream + Task (Bronze → Silver) |
 | 4 | `snowflake/04_gold.sql` | Tạo Gold table, Stream + Task MERGE (Silver → Gold) |
 
-> ⚠️ `02_bronze.sql` có 2 placeholder cần điền trước khi chạy: `YOUR_SAS_TOKEN` và `YOUR_TENANT_ID` / `YOUR_QUEUE_URL`.
+> ⚠️ `02_bronze.sql` có placeholder cần điền trước khi chạy: `YOUR_SAS_TOKEN`, `YOUR_TENANT_ID`, `YOUR_QUEUE_URL`.
 
-### 4. Generate & Upload Data
+### 5. Generate & Upload Data
 ```bash
-# Sinh JSON data
-python generator/iot-genertor.py
+python generator/iot_generator.py
 
 # PUT thủ công qua Snowflake Worksheet:
 PUT file://output_json/*.json @IOT.BRONZE.IOTDATA;
-
-# Hoặc upload lên Azure Blob → Snowpipe tự trigger
 ```
 
-### 5. Verify Pipeline
+### 6. Verify Pipeline
 ```sql
--- Chạy file này sau khi upload data
+-- Kiểm tra row counts + task/pipe/stream status
 snowflake/05_verify.sql
 ```
 
-### 6. Chạy Dashboard
+### 7. Chạy Dashboard
 ```bash
 streamlit run dashboard/streamlit_app.py
 ```
+
+---
+
+## 🔄 Backfill (Nếu Cần)
+
+Stream chỉ capture data **sau khi được tạo**. Nếu Gold bị trống sau khi reset, chạy:
+```sql
+snowflake/06_backfill.sql
+```
+Mọi thứ đều dùng MERGE nên an toàn — không duplicate dù chạy nhiều lần.
 
 ---
 
@@ -116,8 +134,7 @@ SNOWFLAKE_SCHEMA=gold
 > 💡 `SNOWFLAKE_ACCOUNT`: Snowflake UI → góc dưới trái → copy account identifier (dạng `orgname-accountname`)
 
 ### Azure SAS Token (`02_bronze.sql`)
-
-Khi SAS Token hết hạn, **không cần tạo lại Stage** — chỉ cần chạy:
+Khi SAS Token hết hạn, **không cần tạo lại Stage**:
 ```sql
 ALTER STAGE IOT.BRONZE.IOTDATA
   SET CREDENTIALS = (AZURE_SAS_TOKEN = 'sv=...');
@@ -158,7 +175,7 @@ DESC NOTIFICATION INTEGRATION azure_snowpipe_ni;
 Group by `device_id + site_id + hour_bucket`. Chứa avg/min/max temperature & humidity, battery, signal RSSI, uptime, data usage, alert flags.
 
 ### Gold — `IOT.GOLD.FLEET_METRICS`
-Group by `site_id + hour_bucket` (fleet-level KPIs). MERGE idempotent theo natural key.
+Group by `site_id + hour_bucket`. MERGE idempotent theo natural key `analysis_hour + site_id`.
 
 | Column | Description |
 |---|---|
@@ -177,12 +194,12 @@ Group by `site_id + hour_bucket` (fleet-level KPIs). MERGE idempotent theo natur
 
 ## 🛠️ Troubleshooting
 
-Xem chi tiết trong [`note.md`](./note.md):
+Xem chi tiết trong [`note.md`](./note.md) và [`help/snowflake_helper_queries.md`](./help/snowflake_helper_queries.md):
 - `403 AuthenticationFailed` → SAS Token hết hạn, dùng `ALTER STAGE`
 - `Copy executed with 0 files processed` → kiểm tra file format & stage path
 - `Stage / Integration does not exist or not authorized` → kiểm tra GRANT
 - Task không chạy → kiểm tra `SYSTEM$STREAM_HAS_DATA` và task state
-- Cost optimization: auto-suspend 60s, chỉ dùng warehouse khi task chạy
+- Cost optimization: auto-suspend 60s, warehouse chỉ chạy khi task active
 
 ---
 
