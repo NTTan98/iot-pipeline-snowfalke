@@ -201,3 +201,106 @@ Silver
 Gold (fleet_metrics_dynamic)
 ```
 Tổng độ trễ từ device đến Gold: **~10–11 phút**
+
+---
+
+## 📚 7. CHƯA COVER — ROADMAP HỌC TIẾP
+
+> Ghi chú từ 2026-03-19: Những features dưới đây chưa được implement trong project.
+> Một số cần **Enterprise edition** — không available trên Trial.
+
+### 🤖 Snowpark (Python/Java in Snowflake)
+- **Là gì:** Chạy Python/Java/Scala trực tiếp trong Snowflake — không cần move data ra ngoài
+- **Use case:** ML preprocessing, complex business logic, UDF
+- **Khi nào học:** Khi SQL không đủ để xử lý logic phức tạp
+```sql
+CREATE OR REPLACE PROCEDURE process_anomalies()
+RETURNS TABLE(...)
+LANGUAGE PYTHON
+AS $$
+# Python ML code here
+$$;
+```
+
+### 🧠 Cortex ML Functions *(Enterprise only — Trial KHÔNG có)*
+- **Là gì:** Built-in ML functions không cần code
+- **Functions quan trọng:**
+  - `SNOWFLAKE.CORTEX.ANOMALY_DETECTION()` — phát hiện bất thường temperature/humidity
+  - `SNOWFLAKE.CORTEX.FORECAST()` — dự đoán battery sẽ cạn khi nào
+  - `SNOWFLAKE.CORTEX.COMPLETE()` — LLM tóm tắt tình trạng fleet
+- **Thay thế trên Trial:** Dùng Z-Score SQL thuần
+```sql
+-- Z-Score anomaly detection không cần Cortex
+SELECT device_id, avg_temperature,
+  (avg_temperature - AVG(avg_temperature) OVER (PARTITION BY site_id))
+  / NULLIF(STDDEV(avg_temperature) OVER (PARTITION BY site_id), 0) AS z_score,
+  ABS(z_score) > 2 AS is_anomaly
+FROM silver.device_telemetry_hourly;
+```
+
+### 📊 Materialized Views
+- **Là gì:** Pre-computed view, lưu data thực như bảng
+- **Khác Dynamic Table:** Không cần warehouse riêng, auto refresh
+- **Khi nào dùng:** Aggregation đơn giản, không cần TARGET_LAG control
+```sql
+CREATE MATERIALIZED VIEW gold.fleet_summary_mv AS
+SELECT site_id, AVG(avg_temperature), COUNT(*)
+FROM gold.fleet_metrics
+GROUP BY site_id;
+```
+
+### 🔄 CHANGES Clause *(Streamless CDC)*
+- **Là gì:** Query data thay đổi trực tiếp — không cần tạo STREAM object
+- **Ưu điểm:** Ít object hơn, không cần maintain
+- **Nhược điểm:** Khó debug hơn Stream
+```sql
+-- Thay vì: SELECT * FROM bronze_iot_stream
+SELECT * FROM bronze.device_telemetry
+CHANGES(
+  AT (TIMESTAMP => CURRENT_TIMESTAMP() - INTERVAL '5 minutes')
+  TO CURRENT_TIMESTAMP()
+);
+```
+
+### 🌐 Data Sharing
+- **Là gì:** Chia sẻ live data với Snowflake account khác — không copy data
+- **Use case:** Multi-tenant, partner integration, marketplace
+```sql
+CREATE SHARE iot_share;
+GRANT USAGE ON DATABASE iot TO SHARE iot_share;
+GRANT SELECT ON TABLE gold.fleet_metrics TO SHARE iot_share;
+```
+
+### 🔍 Search Optimization Service
+- **Là gì:** Index-like structure cho point lookup queries
+- **Khi nào cần:** Bảng > 100M rows, query `WHERE device_id = '...'` bị chậm
+```sql
+ALTER TABLE silver.device_telemetry_hourly
+  ADD SEARCH OPTIMIZATION ON (device_id);
+```
+
+### 🚨 Alerts & Notifications
+- **Là gì:** Snowflake trigger → Cloud Queue → Email/Webhook
+- **Luồng:** `CREATE ALERT` → `NOTIFICATION INTEGRATION` (outbound) → Azure Logic Apps → Email
+- **Lý do chưa làm:** Cần setup Azure Logic Apps phức tạp
+- **Khi nào cần:** Production IoT — thông báo khi `total_alerts > threshold`
+
+### 📈 Query Acceleration Service *(Enterprise+)*
+- **Là gì:** Auto-scale warehouse cho các query nặng
+```sql
+ALTER WAREHOUSE compute_wh
+  SET QUERY_ACCELERATION_MAX_SCALE_FACTOR = 4;
+```
+
+---
+
+### 🎯 Priority Thực Tế
+
+| Priority | Feature | Lý do |
+|---|---|---|
+| 🔴 Cao | Dashboard | Visualize Gold data — hoàn thiện pipeline |
+| 🔴 Cao | Alerts | Hoàn chỉnh vòng lặp IoT (collect → process → notify) |
+| 🟡 Trung | CHANGES clause | Giảm complexity — thay Stream |
+| 🟡 Trung | Snowpark | Khi SQL không đủ |
+| 🟢 Thấp | Cortex ML | Cần Enterprise edition |
+| 🟢 Thấp | Data Sharing | Chỉ cần khi multi-account |
